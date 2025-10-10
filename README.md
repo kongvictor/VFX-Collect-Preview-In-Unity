@@ -74,12 +74,6 @@
 
 ## 系统要求
 
-### Unity版本支持
-
-- **推荐版本**：Unity 2020.3 LTS 及以上
-- **最低版本**：Unity 2020.3
-- **测试版本**：已在 Unity 2020.3、2021.3、2022.3 上测试通过
-
 ### 操作系统
 
 - **Windows**：Windows 10/11（推荐）
@@ -170,7 +164,6 @@ Editor/ParticlePrefabCollector/
 
 如有使用问题或技术疑问，可通过以下方式获得帮助：
 
-- 查看本README的"常见问题"部分
 - 在GitHub Issues中搜索相关问题
 - 提交新的Issue描述具体问题
 
