@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -11,6 +12,8 @@ namespace Game.Editor.ParticlePrefabCollector
     /// </summary>
     public class ParticlePrefabCollectorWindow : EditorWindow
     {
+        private static ParticlePrefabCollectorWindow _instance;
+
         private class Entry
         {
             public string PrefabPath;
@@ -19,6 +22,10 @@ namespace Game.Editor.ParticlePrefabCollector
         }
 
         private readonly List<Entry> _entries = new();
+
+        // Cached filtered/sorted view to avoid repeated LINQ/alloc in OnGUI
+        private readonly List<Entry> _cachedFiltered = new();
+        private bool _filterCacheDirty = true;
         private Vector2 _scroll;
         private string _search = "";
         private int _currentPage;
@@ -40,7 +47,11 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private bool _previewMode;
         private bool _isPreviewing;
+
         private readonly HashSet<string> _previewSelected = new();
+
+        // Snapshot of targets used for preview paging (built at preview start)
+        private List<string> _previewTargets;
         private int _previewPage;
         private const int PreviewPageSize = 100;
         private bool _previewSelectAll;
@@ -68,6 +79,7 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private void OnEnable()
         {
+            _instance = this;
             LoadOrCreateScanResult();
             if (_scanResultSo)
             {
@@ -101,23 +113,31 @@ namespace Game.Editor.ParticlePrefabCollector
         private void LoadScanResultToEntries()
         {
             _entries.Clear();
+            // Clear previous selections to avoid stale items after rescan/load
+            _previewSelected.Clear();
             foreach (var path in _scanResultSo.prefabPaths)
             {
                 var go = AssetDatabase.LoadAssetAtPath<GameObject>(path);
                 if (!go) continue;
-                _entries.Add(new Entry { PrefabPath = path, PrefabAsset = go });
+                _entries.Add(new Entry
+                {
+                    PrefabPath = path,
+                    PrefabName = Path.GetFileNameWithoutExtension(path),
+                    PrefabAsset = go
+                });
             }
 
             _scanTimeStr = _scanResultSo.ScanTime.ToString("yyyy-MM-dd HH:mm:ss");
             _isScanning = false;
             _scanProgress = 1f;
+            _filterCacheDirty = true;
         }
 
         private void SaveScanResultFromEntries()
         {
             if (_scanResultSo == null) return;
             _scanResultSo.prefabPaths = _entries.Select(e => e.PrefabPath).ToList();
-            _scanResultSo.ScanTime = System.DateTime.Now;
+            _scanResultSo.ScanTime = DateTime.Now;
             _scanResultSo.scanFolders = new List<string>(_scanFolders); // 保存路径
             EditorUtility.SetDirty(_scanResultSo);
             AssetDatabase.SaveAssets();
@@ -219,11 +239,19 @@ namespace Game.Editor.ParticlePrefabCollector
         private void DrawToolbar()
         {
             GUILayout.BeginHorizontal(EditorStyles.helpBox);
-            GUI.enabled = !_isScanning;
+            GUI.enabled = !_isScanning; // keep other controls enabled unless scanning
             var iconRect = GUILayoutUtility.GetRect(18, 18, GUILayout.Width(18));
             var icon = EditorGUIUtility.IconContent("Search Icon");
             GUI.Label(iconRect, icon);
-            _search = GUILayout.TextField(_search, GUILayout.Width(200));
+            var newSearch = GUILayout.TextField(_search, GUILayout.Width(200));
+            if (!string.Equals(newSearch, _search))
+            {
+                _search = newSearch;
+                _filterCacheDirty = true;
+            }
+
+            // Disable rescan when scanning or previewing
+            EditorGUI.BeginDisabledGroup(_isScanning || _isPreviewing);
             if (GUILayout.Button("重新收集", GUILayout.Width(90)))
             {
                 if (EditorUtility.DisplayDialog($"准备重新收集",
@@ -233,7 +261,12 @@ namespace Game.Editor.ParticlePrefabCollector
                 }
             }
 
-            int selectedCount = _previewSelected.Count;
+            EditorGUI.EndDisabledGroup();
+
+            // When filtering, only count selections within the filtered view
+            int selectedCount = string.IsNullOrEmpty(_search)
+                ? _previewSelected.Count
+                : GetFilteredEntriesCached().Count(e => _previewSelected.Contains(e.PrefabPath));
             if (!_isPreviewing)
             {
                 GUI.enabled = selectedCount > 0;
@@ -241,47 +274,28 @@ namespace Game.Editor.ParticlePrefabCollector
                 {
                     _isPreviewing = true;
                     _previewPage = 0;
+                    // Build preview targets snapshot: if searching, only include selected items within current filtered results
+                    if (string.IsNullOrEmpty(_search))
+                    {
+                        _previewTargets = _previewSelected.ToList();
+                    }
+                    else
+                    {
+                        var filtered = GetFilteredEntriesCached();
+                        var filteredSet = new HashSet<string>(filtered.Select(e => e.PrefabPath));
+                        _previewTargets = _previewSelected.Where(p => filteredSet.Contains(p)).ToList();
+                    }
+
                     ShowPreviewScene();
+                    ParticlePrefabPreviewSceneHelper.OpenControlWindow();
                 }
 
                 GUI.enabled = true;
             }
             else
             {
-                if (GUILayout.Button("结束预览", GUILayout.Width(90)))
-                {
-                    _isPreviewing = false;
-                    ParticlePrefabPreviewSceneHelper.ClosePreviewScene();
-                }
-
-                // 计算页数和当前范围
-                var all = _previewSelected.ToList();
-                int total = all.Count;
-                int perPage = PreviewPageSize;
-                int maxPage = Mathf.Max(0, Mathf.CeilToInt(total / (float)perPage) - 1);
-                int startIdx = _previewPage * perPage + 1;
-                int endIdx = Mathf.Min((_previewPage + 1) * perPage, total);
-                GUILayout.Space(10);
-                if (GUILayout.Button("上一页", GUILayout.Width(60)))
-                {
-                    if (_previewPage <= 0) _previewPage = maxPage;
-                    else _previewPage--;
-                    ShowPreviewScene();
-                }
-
-                if (GUILayout.Button("下一页", GUILayout.Width(60)))
-                {
-                    if (_previewPage >= maxPage) _previewPage = 0;
-                    else _previewPage++;
-                    ShowPreviewScene();
-                }
-
-                GUILayout.Label($"第 {_previewPage + 1}/{maxPage + 1} 页  显示{startIdx}-{endIdx}/{total}",
-                    GUILayout.Width(180));
-                if (GUILayout.Button("一键播放", GUILayout.Width(80)))
-                {
-                    ParticlePrefabPreviewSceneHelper.PlayAllParticles();
-                }
+                // 预览模式时，主要控制已移动到独立控制窗口，为避免重复，这里仅显示轻微提示
+                GUILayout.Label("预览中… 请使用“Particle Preview”控制窗口进行操作", EditorStyles.miniLabel);
             }
 
             GUILayout.FlexibleSpace();
@@ -291,19 +305,8 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private void DrawEntries(float scrollHeight)
         {
-            // 分页和筛选
-            var filtered = string.IsNullOrEmpty(_search)
-                ? _entries
-                : _entries.Where(e => e.PrefabPath.ToLower().Contains(_search.ToLower())).ToList();
-            // 排序
-            if (_sortColumn == SortColumn.PrefabName)
-                filtered = _sortAscending
-                    ? filtered.OrderBy(e => Path.GetFileNameWithoutExtension(e.PrefabPath)).ToList()
-                    : filtered.OrderByDescending(e => Path.GetFileNameWithoutExtension(e.PrefabPath)).ToList();
-            else
-                filtered = _sortAscending
-                    ? filtered.OrderBy(e => e.PrefabPath).ToList()
-                    : filtered.OrderByDescending(e => e.PrefabPath).ToList();
+            // 使用缓存后的筛选/排序结果，减少每帧LINQ开销
+            var filtered = GetFilteredEntriesCached();
             _totalPages = Mathf.Max(1, Mathf.CeilToInt(filtered.Count / (float)_pageSize));
             if (_currentPage >= _totalPages) _currentPage = _totalPages - 1;
             int start = _currentPage * _pageSize;
@@ -332,6 +335,7 @@ namespace Game.Editor.ParticlePrefabCollector
                 alignment = TextAnchor.MiddleCenter,
                 fontSize = 8,
             };
+            EditorGUI.BeginDisabledGroup(_isPreviewing);
             if (GUI.Button(toggleRect, icon, style))
             {
                 if (_previewSelectPartial || !_previewSelectAll)
@@ -344,6 +348,8 @@ namespace Game.Editor.ParticlePrefabCollector
                 }
             }
 
+            EditorGUI.EndDisabledGroup();
+
             DrawSortLabel("Prefab", SortColumn.PrefabName, prefabWidth);
             DrawSortLabel("路径", SortColumn.Path, pathWidth);
             GUILayout.EndHorizontal();
@@ -354,7 +360,9 @@ namespace Game.Editor.ParticlePrefabCollector
                 var e = filtered[i];
                 GUILayout.BeginHorizontal(GUI.skin.box);
                 bool sel = _previewSelected.Contains(e.PrefabPath);
+                EditorGUI.BeginDisabledGroup(_isPreviewing);
                 bool newSel = GUILayout.Toggle(sel, GUIContent.none, GUILayout.Width(selectToggleWidth));
+                EditorGUI.EndDisabledGroup();
                 if (newSel != sel)
                 {
                     if (newSel)
@@ -401,12 +409,16 @@ namespace Game.Editor.ParticlePrefabCollector
             if (GUI.Button(rect, label + icon, style))
             {
                 if (_sortColumn == column)
+                {
                     _sortAscending = !_sortAscending;
+                }
                 else
                 {
                     _sortColumn = column;
                     _sortAscending = true;
                 }
+
+                _filterCacheDirty = true;
             }
         }
 
@@ -442,6 +454,9 @@ namespace Game.Editor.ParticlePrefabCollector
         {
             StopScan();
             _entries.Clear();
+            // Clear any previous selections to ensure Select All applies only to new results
+            _previewSelected.Clear();
+            _currentPage = 0;
             var guids = new List<string>();
             foreach (var folder in _scanFolders)
             {
@@ -457,6 +472,7 @@ namespace Game.Editor.ParticlePrefabCollector
             _scanProgress = 0f;
             EditorApplication.update += UpdateScan;
             _currentPage = 0;
+            _filterCacheDirty = true;
         }
 
         private void StopScan()
@@ -484,7 +500,12 @@ namespace Game.Editor.ParticlePrefabCollector
                 if (go.GetComponentInChildren<ParticleSystem>(true))
                 {
                     prefabSet.Add(path);
-                    _entries.Add(new Entry { PrefabPath = path, PrefabAsset = go });
+                    _entries.Add(new Entry
+                    {
+                        PrefabPath = path,
+                        PrefabName = Path.GetFileNameWithoutExtension(path),
+                        PrefabAsset = go
+                    });
                 }
 
                 processed++;
@@ -497,12 +518,17 @@ namespace Game.Editor.ParticlePrefabCollector
                 SaveScanResultFromEntries();
             }
 
+            if (processed > 0)
+            {
+                _filterCacheDirty = true;
+            }
+
             Repaint();
         }
 
         private void ShowPreviewScene()
         {
-            var all = _previewSelected.ToList();
+            var all = _previewTargets ?? _previewSelected.ToList();
             int maxPage = Mathf.Max(0, Mathf.CeilToInt(all.Count / (float)PreviewPageSize) - 1);
             if (_previewPage > maxPage) _previewPage = maxPage;
             int start = _previewPage * PreviewPageSize;
@@ -515,7 +541,9 @@ namespace Game.Editor.ParticlePrefabCollector
             var spawned = ParticlePrefabPreviewSceneHelper.GetSpawnedPrefabs();
             if (spawned is { Count: > 0 })
             {
-                Selection.objects = spawned.Where(go => go).ToArray<Object>();
+                Selection.objects = spawned.Where(go => go)
+                    .Cast<UnityEngine.Object>()
+                    .ToArray();
             }
         }
 
@@ -530,12 +558,122 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private void OnDisable()
         {
+            if (ReferenceEquals(_instance, this))
+            {
+                _instance = null;
+            }
+
             if (_isPreviewing)
             {
                 _isPreviewing = false;
                 _previewSelected.Clear();
+                _previewTargets = null;
                 ParticlePrefabPreviewSceneHelper.ClosePreviewScene();
             }
+        }
+
+        public static void EndPreviewFromControl()
+        {
+            if (_instance == null) return;
+            if (!_instance._isPreviewing) return;
+            _instance._isPreviewing = false;
+            ParticlePrefabPreviewSceneHelper.ClosePreviewScene();
+            _instance._previewTargets = null;
+            _instance.Repaint();
+        }
+
+        public static void NextPageFromControl()
+        {
+            if (_instance == null || !_instance._isPreviewing) return;
+            var all = _instance._previewTargets ?? _instance._previewSelected.ToList();
+            int total = all.Count;
+            if (total == 0) return;
+            int perPage = PreviewPageSize;
+            int maxPage = Mathf.Max(0, Mathf.CeilToInt(total / (float)perPage) - 1);
+            if (_instance._previewPage >= maxPage) _instance._previewPage = 0;
+            else _instance._previewPage++;
+            _instance.ShowPreviewScene();
+        }
+
+        public static void PrevPageFromControl()
+        {
+            if (_instance == null || !_instance._isPreviewing) return;
+            var all = _instance._previewTargets ?? _instance._previewSelected.ToList();
+            int total = all.Count;
+            if (total == 0) return;
+            int perPage = PreviewPageSize;
+            int maxPage = Mathf.Max(0, Mathf.CeilToInt(total / (float)perPage) - 1);
+            if (_instance._previewPage <= 0) _instance._previewPage = maxPage;
+            else _instance._previewPage--;
+            _instance.ShowPreviewScene();
+        }
+
+        public static void GetPageInfo(out int currentPage, out int maxPage, out int startIdx, out int endIdx,
+            out int total)
+        {
+            currentPage = 0;
+            maxPage = 0;
+            startIdx = 0;
+            endIdx = 0;
+            total = 0;
+            if (_instance == null || !_instance._isPreviewing) return;
+            var all = _instance._previewTargets ?? _instance._previewSelected.ToList();
+            total = all.Count;
+            int perPage = PreviewPageSize;
+            maxPage = Mathf.Max(0, Mathf.CeilToInt(total / (float)perPage) - 1);
+            currentPage = Mathf.Clamp(_instance._previewPage, 0, maxPage);
+            startIdx = total == 0 ? 0 : currentPage * perPage + 1;
+            endIdx = Mathf.Min((currentPage + 1) * perPage, total);
+        }
+
+        private List<Entry> GetFilteredEntriesCached()
+        {
+            if (_filterCacheDirty)
+            {
+                _cachedFiltered.Clear();
+
+                // Filter
+                if (string.IsNullOrEmpty(_search))
+                {
+                    _cachedFiltered.AddRange(_entries);
+                }
+                else
+                {
+                    // Case-insensitive match on path
+                    foreach (var e in _entries)
+                    {
+                        if (e.PrefabPath != null &&
+                            e.PrefabPath.IndexOf(_search, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            _cachedFiltered.Add(e);
+                        }
+                    }
+                }
+
+                // Sort
+                if (_sortColumn == SortColumn.PrefabName)
+                {
+                    if (_sortAscending)
+                        _cachedFiltered.Sort((a, b) =>
+                            string.Compare(a.PrefabName, b.PrefabName, StringComparison.Ordinal));
+                    else
+                        _cachedFiltered.Sort((a, b) =>
+                            string.Compare(b.PrefabName, a.PrefabName, StringComparison.Ordinal));
+                }
+                else
+                {
+                    if (_sortAscending)
+                        _cachedFiltered.Sort((a, b) =>
+                            string.Compare(a.PrefabPath, b.PrefabPath, StringComparison.Ordinal));
+                    else
+                        _cachedFiltered.Sort((a, b) =>
+                            string.Compare(b.PrefabPath, a.PrefabPath, StringComparison.Ordinal));
+                }
+
+                _filterCacheDirty = false;
+            }
+
+            return _cachedFiltered;
         }
     }
 }

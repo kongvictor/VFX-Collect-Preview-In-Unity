@@ -13,19 +13,40 @@ namespace Game.Editor.ParticlePrefabCollector
     public static class ParticlePrefabPreviewSceneHelper
     {
         private static Scene _previewScene;
+
         private static readonly List<GameObject> SpawnedPrefabs = new();
+
+        // Track ParticleSystems that were non-looping at spawn time
+        private static readonly List<ParticleSystem> InitialNonLoopParticles = new();
         private static bool _sceneGuiRegistered;
         private static GUIStyle _labelStyle;
         private static Texture2D _labelBackgroundTexture;
+
         private const int PrefabsPerRow = 10;
-        private const float PreviewSpacing = 10f;
-        private const float BoundarySize = 10f;
+
+        // Configurable spacing, default 10; synced with config asset
+        private static float _previewSpacing = 10f;
+        public static bool ShowBoundaries = true;
+        public static bool ShowLabels = true;
+        public static bool LoopAll;
+        public static bool VerticalLayout; // false -> XZ plane (default), true -> XY plane
+
+        private const string ConfigAssetPath =
+            "Assets/Editor/ParticlePrefabCollector/ParticlePrefabPreviewConfig.asset";
+
+        private static ScriptableObject _configObj;
 
         public static void OpenPreviewScene()
         {
             if (_previewScene.IsValid() && _previewScene.isLoaded) return;
             _previewScene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Additive);
             SceneManager.SetActiveScene(_previewScene);
+            // Load config and apply
+            LoadOrCreateConfigObject();
+            ApplyConfigToToggles();
+            ApplyConfigToSpacing();
+            ApplyConfigToLooping();
+            ApplyConfigToLayout();
             EnsureSceneGuiHook();
         }
 
@@ -49,35 +70,73 @@ namespace Game.Editor.ParticlePrefabCollector
             }
 
             SpawnedPrefabs.Clear();
+            InitialNonLoopParticles.Clear();
         }
 
         public static void SpawnPrefabs(List<GameObject> prefabs)
         {
             ClearPreviewObjects();
             if (!_previewScene.IsValid() || !_previewScene.isLoaded) return;
-            int count = prefabs.Count;
-            const int perRow = PrefabsPerRow;
-            float spacing = PreviewSpacing;
-            for (int i = 0; i < count; i++)
+            var count = prefabs.Count;
+            for (var i = 0; i < count; i++)
             {
                 var prefab = prefabs[i];
                 if (!prefab) continue;
                 var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, _previewScene);
-                int row = i / perRow;
-                int col = i % perRow;
-                go.transform.position = new Vector3(col * spacing, 0, -row * spacing);
+                var row = i / PrefabsPerRow;
+                var col = i % PrefabsPerRow;
+                // XY plane: X across, Y down
+                go.transform.position = VerticalLayout
+                    ? new Vector3(col * _previewSpacing, -row * _previewSpacing, 0)
+                    :
+                    // XZ plane: X across, Z back
+                    new Vector3(col * _previewSpacing, 0, -row * _previewSpacing);
+
                 SpawnedPrefabs.Add(go);
+
+                // Collect initially non-looping particle systems for selective control
+                foreach (var ps in go.GetComponentsInChildren<ParticleSystem>(true))
+                {
+                    try
+                    {
+                        var main = ps.main;
+                        if (!main.loop)
+                        {
+                            InitialNonLoopParticles.Add(ps);
+                        }
+                    }
+                    catch
+                    {
+                        /* ignore malformed components */
+                    }
+                }
+            }
+
+            // If config requires looping, enforce it and restart playback
+            if (LoopAll)
+            {
+                ApplyLoopingToSpawned(true, true);
             }
 
             // 自动聚焦到所有对象中心
             if (SpawnedPrefabs.Count > 0)
             {
                 // 计算排布宽度和深度
-                int rowCount = (count + perRow - 1) / perRow;
-                int colCount = count > perRow ? perRow : count;
-                float centerX = (colCount - 1) * spacing / 2f;
-                float centerZ = -(rowCount - 1) * spacing / 2f;
-                var center = new Vector3(centerX, 0, centerZ);
+                var rowCount = (count + PrefabsPerRow - 1) / PrefabsPerRow;
+                var colCount = count > PrefabsPerRow ? PrefabsPerRow : count;
+                var centerX = (colCount - 1) * _previewSpacing / 2f;
+                Vector3 center;
+                if (VerticalLayout)
+                {
+                    var centerY = -(rowCount - 1) * _previewSpacing / 2f;
+                    center = new Vector3(centerX, centerY, 0);
+                }
+                else
+                {
+                    var centerZ = -(rowCount - 1) * _previewSpacing / 2f;
+                    center = new Vector3(centerX, 0, centerZ);
+                }
+
                 var view = SceneView.lastActiveSceneView;
                 if (view)
                 {
@@ -88,7 +147,7 @@ namespace Game.Editor.ParticlePrefabCollector
                         bounds.Encapsulate(SpawnedPrefabs[i].transform.position);
                     }
 
-                    bounds.Expand(new Vector3(PreviewSpacing, PreviewSpacing, PreviewSpacing));
+                    bounds.Expand(new Vector3(_previewSpacing, _previewSpacing, _previewSpacing));
                     view.Frame(bounds, false);
                     view.Repaint();
                 }
@@ -114,6 +173,244 @@ namespace Game.Editor.ParticlePrefabCollector
         {
             return SpawnedPrefabs;
         }
+
+        public static int GetPreviewSpacingInt()
+        {
+            return Mathf.RoundToInt(_previewSpacing);
+        }
+
+        public static void OpenControlWindow()
+        {
+            var type = System.Type.GetType("Game.Editor.ParticlePrefabCollector.ParticlePrefabPreviewControlWindow");
+            if (type != null)
+            {
+                var window = EditorWindow.GetWindow(type);
+                window.titleContent = new GUIContent("Particle Preview");
+                window.Show();
+                window.Focus();
+            }
+            else
+            {
+                Debug.LogWarning("ParticlePrefabPreviewControlWindow 类型未找到，已跳过打开控制窗口。");
+            }
+        }
+
+        private static void LoadOrCreateConfigObject()
+        {
+            _configObj = AssetDatabase.LoadAssetAtPath<ScriptableObject>(ConfigAssetPath);
+            if (_configObj == null)
+            {
+                _configObj =
+                    ScriptableObject.CreateInstance<ParticlePrefabPreviewConfig>();
+                if (_configObj != null)
+                {
+                    AssetDatabase.CreateAsset(_configObj, ConfigAssetPath);
+                    AssetDatabase.SaveAssets();
+                }
+            }
+        }
+
+        private static void ApplyConfigToToggles()
+        {
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pBoundary = so.FindProperty("showBoundaries");
+            var pLabel = so.FindProperty("showLabels");
+            if (pBoundary != null) ShowBoundaries = pBoundary.boolValue;
+            if (pLabel != null) ShowLabels = pLabel.boolValue;
+        }
+
+        private static void ApplyConfigToSpacing()
+        {
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pSpacing = so.FindProperty("previewSpacing");
+            if (pSpacing != null)
+            {
+                var clamped = Mathf.Clamp(pSpacing.intValue, 1, 100);
+                _previewSpacing = clamped;
+            }
+        }
+
+        private static void ApplyConfigToLooping()
+        {
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pLoop = so.FindProperty("loopAllParticles");
+            if (pLoop != null)
+            {
+                LoopAll = pLoop.boolValue;
+            }
+        }
+
+        private static void ApplyConfigToLayout()
+        {
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pVertical = so.FindProperty("verticalLayout");
+            if (pVertical != null)
+            {
+                VerticalLayout = pVertical.boolValue;
+            }
+        }
+
+        public static void PersistTogglesToConfig()
+        {
+            if (_configObj == null)
+            {
+                LoadOrCreateConfigObject();
+            }
+
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pBoundary = so.FindProperty("showBoundaries");
+            var pLabel = so.FindProperty("showLabels");
+            if (pBoundary != null) pBoundary.boolValue = ShowBoundaries;
+            if (pLabel != null) pLabel.boolValue = ShowLabels;
+            so.ApplyModifiedProperties();
+            EditorUtility.SetDirty(_configObj);
+            AssetDatabase.SaveAssets();
+        }
+
+        public static void PersistLoopAllToConfig()
+        {
+            if (_configObj == null)
+            {
+                LoadOrCreateConfigObject();
+            }
+
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pLoop = so.FindProperty("loopAllParticles");
+            if (pLoop != null)
+            {
+                pLoop.boolValue = LoopAll;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_configObj);
+                AssetDatabase.SaveAssets();
+            }
+        }
+
+        public static void ApplyLoopingToSpawned(bool enable, bool restartOnEnable)
+        {
+            if (InitialNonLoopParticles.Count == 0) return;
+            // Clean up null/destroyed references
+            for (int i = InitialNonLoopParticles.Count - 1; i >= 0; i--)
+            {
+                if (InitialNonLoopParticles[i] == null)
+                    InitialNonLoopParticles.RemoveAt(i);
+            }
+
+            foreach (var ps in InitialNonLoopParticles)
+            {
+                if (!ps) continue;
+                var main = ps.main;
+                main.loop = enable;
+                if (enable && restartOnEnable)
+                {
+                    ps.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                    ps.Play(true);
+                }
+            }
+        }
+
+        public static void PersistSpacingToConfigAndRelayout(int newSpacing)
+        {
+            if (_configObj == null)
+            {
+                LoadOrCreateConfigObject();
+            }
+
+            if (_configObj == null) return;
+            var clamped = Mathf.Clamp(newSpacing, 1, 100);
+            var so = new SerializedObject(_configObj);
+            var pSpacing = so.FindProperty("previewSpacing");
+            if (pSpacing != null)
+            {
+                pSpacing.intValue = clamped;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_configObj);
+                AssetDatabase.SaveAssets();
+            }
+
+            // Update runtime field and relayout
+            _previewSpacing = clamped;
+            RelayoutSpawnedPrefabs();
+            SceneView.RepaintAll();
+        }
+
+        public static void PersistVerticalLayoutToConfigAndRelayout(bool vertical)
+        {
+            if (_configObj == null)
+            {
+                LoadOrCreateConfigObject();
+            }
+
+            if (_configObj == null) return;
+            var so = new SerializedObject(_configObj);
+            var pVertical = so.FindProperty("verticalLayout");
+            if (pVertical != null)
+            {
+                pVertical.boolValue = vertical;
+                so.ApplyModifiedProperties();
+                EditorUtility.SetDirty(_configObj);
+                AssetDatabase.SaveAssets();
+            }
+
+            VerticalLayout = vertical;
+            RelayoutSpawnedPrefabs();
+            SceneView.RepaintAll();
+        }
+
+        private static void RelayoutSpawnedPrefabs()
+        {
+            if (SpawnedPrefabs.Count == 0) return;
+            for (int i = 0; i < SpawnedPrefabs.Count; i++)
+            {
+                var go = SpawnedPrefabs[i];
+                if (!go) continue;
+                var row = i / PrefabsPerRow;
+                var col = i % PrefabsPerRow;
+                go.transform.position = VerticalLayout
+                    ? new Vector3(col * _previewSpacing, -row * _previewSpacing, 0)
+                    : new Vector3(col * _previewSpacing, 0, -row * _previewSpacing);
+            }
+
+            // Reframe view to fit new layout
+            var view = SceneView.lastActiveSceneView;
+            if (view && SpawnedPrefabs.Count > 0)
+            {
+                var count = SpawnedPrefabs.Count;
+                var rowCount = (count + PrefabsPerRow - 1) / PrefabsPerRow;
+                var colCount = count > PrefabsPerRow ? PrefabsPerRow : count;
+                var centerX = (colCount - 1) * _previewSpacing / 2f;
+                Vector3 center;
+                if (VerticalLayout)
+                {
+                    var centerY = -(rowCount - 1) * _previewSpacing / 2f;
+                    center = new Vector3(centerX, centerY, 0);
+                }
+                else
+                {
+                    var centerZ = -(rowCount - 1) * _previewSpacing / 2f;
+                    center = new Vector3(centerX, 0, centerZ);
+                }
+
+                view.pivot = center;
+
+                var bounds = new Bounds(SpawnedPrefabs[0].transform.position, Vector3.one);
+                for (int i = 1; i < SpawnedPrefabs.Count; i++)
+                {
+                    if (SpawnedPrefabs[i])
+                        bounds.Encapsulate(SpawnedPrefabs[i].transform.position);
+                }
+
+                bounds.Expand(new Vector3(_previewSpacing, _previewSpacing, _previewSpacing));
+                view.Frame(bounds, false);
+                view.Repaint();
+            }
+        }
+
 
         private static void EnsureSceneGuiHook()
         {
@@ -168,21 +465,45 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private static void DrawPreviewElements(GameObject go)
         {
-            DrawBoundary(go);
-            DrawLabel(go);
+            if (ShowBoundaries)
+            {
+                DrawBoundary(go);
+            }
+
+            if (ShowLabels)
+            {
+                DrawLabel(go);
+            }
         }
 
         private static void DrawBoundary(GameObject go)
         {
             var center = go.transform.position;
-            const float halfSize = BoundarySize * 0.5f;
-            var corners = new[]
+            var halfSize = _previewSpacing * 0.5f;
+            Vector3[] corners;
+            if (VerticalLayout)
             {
-                center + new Vector3(-halfSize, 0f, -halfSize),
-                center + new Vector3(halfSize, 0f, -halfSize),
-                center + new Vector3(halfSize, 0f, halfSize),
-                center + new Vector3(-halfSize, 0f, halfSize)
-            };
+                // XY plane rectangle
+                corners = new[]
+                {
+                    new Vector3(center.x - halfSize, center.y - halfSize, 0f),
+                    new Vector3(center.x + halfSize, center.y - halfSize, 0f),
+                    new Vector3(center.x + halfSize, center.y + halfSize, 0f),
+                    new Vector3(center.x - halfSize, center.y + halfSize, 0f)
+                };
+            }
+            else
+            {
+                // XZ plane rectangle
+                corners = new[]
+                {
+                    new Vector3(center.x - halfSize, 0f, center.z - halfSize),
+                    new Vector3(center.x + halfSize, 0f, center.z - halfSize),
+                    new Vector3(center.x + halfSize, 0f, center.z + halfSize),
+                    new Vector3(center.x - halfSize, 0f, center.z + halfSize)
+                };
+            }
+
             var fillColor = new Color(0f, 0.75f, 1f, 0.05f);
             var outlineColor = new Color(0f, 0.75f, 1f, 0.6f);
             Handles.DrawSolidRectangleWithOutline(corners, fillColor, outlineColor);
@@ -190,16 +511,20 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private static void DrawLabel(GameObject go)
         {
-            var forward = go.transform.forward;
-            if (forward.sqrMagnitude < 0.0001f)
+            var basePosition = go.transform.position;
+            Vector3 groundPosition;
+            Vector3 labelOffset;
+            if (VerticalLayout)
             {
-                forward = Vector3.forward;
+                groundPosition = new Vector3(basePosition.x, basePosition.y, 0f);
+                labelOffset = Vector3.forward * 0.25f * _previewSpacing + Vector3.up * 0.25f;
+            }
+            else
+            {
+                groundPosition = new Vector3(basePosition.x, basePosition.y, basePosition.z);
+                labelOffset = Vector3.back * 0.25f * _previewSpacing + Vector3.up * 0.25f;
             }
 
-            var basePosition = go.transform.position;
-            var groundY = basePosition.y;
-            var groundPosition = new Vector3(basePosition.x, groundY, basePosition.z);
-            var labelOffset = Vector3.back * 0.25f * PreviewSpacing + Vector3.up * 0.25f;
             var labelPosition = groundPosition + labelOffset;
 
             Handles.color = new Color(1f, 1f, 1f, 0.35f);
