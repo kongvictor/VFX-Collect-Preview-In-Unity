@@ -14,7 +14,7 @@
 ## 使用方法
 
 1. 将 `Editor/ParticlePrefabCollector` 文件夹下的所有脚本和资源导入到你的 Unity 项目中。
-2. 在 Unity 菜单栏选择 `窗口(Window)` > `粒子特效收集器(Particle Prefab Collector)` 打开工具窗口。
+2. 在 Unity 菜单栏选择 `Tools` > `Particle` > `Particle Prefab Collector` 打开工具窗口。
 3. 点击“扫描”按钮，选择需要扫描的目录，工具会自动收集所有粒子预制体。
 4. 在工具窗口中浏览、预览和管理粒子特效资源。
 
