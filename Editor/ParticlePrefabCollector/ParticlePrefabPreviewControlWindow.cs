@@ -9,7 +9,9 @@ namespace Game.Editor.ParticlePrefabCollector
     {
         private Vector2 _leftScroll;
         private GUIStyle _panelStyle;
+
         private GUIStyle _bottomBarStyle;
+
         // Cached reflection info for Selection Outline
         private static PropertyInfo _showSelectionOutlineProp;
         private static bool _selectionOutlineChecked;
@@ -83,7 +85,7 @@ namespace Game.Editor.ParticlePrefabCollector
                     }
 
                     EditorGUILayout.HelpBox(
-                        "该开关不会保存到配置，且某些版本的Unity可能不支持。如需从Gizmos面板恢复，请在Scene视图的Gizmos菜单中勾选/取消 'Selection Outline'。",
+                        "该开关不会保存到配置，且某些版本的Unity可能不支持。如需恢复，请在Scene视图的Gizmos菜单中勾选/取消 'Selection Outline'。",
                         MessageType.Info);
                     EditorGUILayout.Space(4);
                     var newBoundary =
@@ -181,10 +183,17 @@ namespace Game.Editor.ParticlePrefabCollector
         // Reflection helpers for Selection Outline (cached)
         private static bool EnsureSelectionOutlineProperty()
         {
-            if (_selectionOutlineChecked) return _showSelectionOutlineProp != null;
+            if (_selectionOutlineChecked) 
+                return _showSelectionOutlineProp != null;
+            
             _selectionOutlineChecked = true;
-            var sceneViewType = typeof(SceneView);
-            _showSelectionOutlineProp = sceneViewType.GetProperty("showSelectionOutline", BindingFlags.NonPublic | BindingFlags.Static);
+            var annotationUtilityType = Type.GetType("UnityEditor.AnnotationUtility, UnityEditor");
+            
+            if (annotationUtilityType == null) 
+                return false;
+            
+            _showSelectionOutlineProp = annotationUtilityType.GetProperty("showSelectionOutline",
+                BindingFlags.Static | BindingFlags.NonPublic);
             return _showSelectionOutlineProp != null;
         }
 

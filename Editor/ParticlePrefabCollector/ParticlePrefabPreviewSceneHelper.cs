@@ -26,15 +26,16 @@ namespace Game.Editor.ParticlePrefabCollector
 
         // Configurable spacing, default 10; synced with config asset
         private static float _previewSpacing = 10f;
-        public static bool ShowBoundaries = true;
-        public static bool ShowLabels = true;
-        public static bool LoopAll;
-        public static bool VerticalLayout; // false -> XZ plane (default), true -> XY plane
+        private static ParticlePrefabPreviewConfig _configObj;
+        private static bool _saveScheduled;
 
         private const string ConfigAssetPath =
             "Assets/Editor/ParticlePrefabCollector/ParticlePrefabPreviewConfig.asset";
 
-        private static ScriptableObject _configObj;
+        public static bool ShowBoundaries { get; set; } = true;
+        public static bool ShowLabels { get; set; } = true;
+        public static bool LoopAll { get; set; }
+        public static bool VerticalLayout { get; private set; } // false -> XZ plane (default), true -> XY plane
 
         public static void OpenPreviewScene()
         {
@@ -197,7 +198,7 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private static void LoadOrCreateConfigObject()
         {
-            _configObj = AssetDatabase.LoadAssetAtPath<ScriptableObject>(ConfigAssetPath);
+            _configObj = AssetDatabase.LoadAssetAtPath<ParticlePrefabPreviewConfig>(ConfigAssetPath);
             if (_configObj == null)
             {
                 _configObj =
@@ -212,46 +213,35 @@ namespace Game.Editor.ParticlePrefabCollector
 
         private static void ApplyConfigToToggles()
         {
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pBoundary = so.FindProperty("showBoundaries");
-            var pLabel = so.FindProperty("showLabels");
-            if (pBoundary != null) ShowBoundaries = pBoundary.boolValue;
-            if (pLabel != null) ShowLabels = pLabel.boolValue;
+            if (_configObj == null)
+                return;
+
+            ShowBoundaries = _configObj.showBoundaries;
+            ShowLabels = _configObj.showLabels;
         }
 
         private static void ApplyConfigToSpacing()
         {
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pSpacing = so.FindProperty("previewSpacing");
-            if (pSpacing != null)
-            {
-                var clamped = Mathf.Clamp(pSpacing.intValue, 1, 100);
-                _previewSpacing = clamped;
-            }
+            if (_configObj == null)
+                return;
+
+            _previewSpacing = Mathf.Clamp(_configObj.previewSpacing, 1, 100);
         }
 
         private static void ApplyConfigToLooping()
         {
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pLoop = so.FindProperty("loopAllParticles");
-            if (pLoop != null)
-            {
-                LoopAll = pLoop.boolValue;
-            }
+            if (_configObj == null)
+                return;
+
+            LoopAll = _configObj.loopAllParticles;
         }
 
         private static void ApplyConfigToLayout()
         {
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pVertical = so.FindProperty("verticalLayout");
-            if (pVertical != null)
-            {
-                VerticalLayout = pVertical.boolValue;
-            }
+            if (_configObj == null)
+                return;
+
+            VerticalLayout = _configObj.verticalLayout;
         }
 
         public static void PersistTogglesToConfig()
@@ -261,15 +251,12 @@ namespace Game.Editor.ParticlePrefabCollector
                 LoadOrCreateConfigObject();
             }
 
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pBoundary = so.FindProperty("showBoundaries");
-            var pLabel = so.FindProperty("showLabels");
-            if (pBoundary != null) pBoundary.boolValue = ShowBoundaries;
-            if (pLabel != null) pLabel.boolValue = ShowLabels;
-            so.ApplyModifiedProperties();
-            EditorUtility.SetDirty(_configObj);
-            AssetDatabase.SaveAssets();
+            if (_configObj == null)
+                return;
+
+            _configObj.showBoundaries = ShowBoundaries;
+            _configObj.showLabels = ShowLabels;
+            MarkConfigDirty(false);
         }
 
         public static void PersistLoopAllToConfig()
@@ -279,16 +266,11 @@ namespace Game.Editor.ParticlePrefabCollector
                 LoadOrCreateConfigObject();
             }
 
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pLoop = so.FindProperty("loopAllParticles");
-            if (pLoop != null)
-            {
-                pLoop.boolValue = LoopAll;
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_configObj);
-                AssetDatabase.SaveAssets();
-            }
+            if (_configObj == null)
+                return;
+
+            _configObj.loopAllParticles = LoopAll;
+            MarkConfigDirty(false);
         }
 
         public static void ApplyLoopingToSpawned(bool enable, bool restartOnEnable)
@@ -321,17 +303,12 @@ namespace Game.Editor.ParticlePrefabCollector
                 LoadOrCreateConfigObject();
             }
 
-            if (_configObj == null) return;
+            if (_configObj == null)
+                return;
+
             var clamped = Mathf.Clamp(newSpacing, 1, 100);
-            var so = new SerializedObject(_configObj);
-            var pSpacing = so.FindProperty("previewSpacing");
-            if (pSpacing != null)
-            {
-                pSpacing.intValue = clamped;
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_configObj);
-                AssetDatabase.SaveAssets();
-            }
+            _configObj.previewSpacing = clamped;
+            MarkConfigDirty(true);
 
             // Update runtime field and relayout
             _previewSpacing = clamped;
@@ -346,20 +323,45 @@ namespace Game.Editor.ParticlePrefabCollector
                 LoadOrCreateConfigObject();
             }
 
-            if (_configObj == null) return;
-            var so = new SerializedObject(_configObj);
-            var pVertical = so.FindProperty("verticalLayout");
-            if (pVertical != null)
-            {
-                pVertical.boolValue = vertical;
-                so.ApplyModifiedProperties();
-                EditorUtility.SetDirty(_configObj);
-                AssetDatabase.SaveAssets();
-            }
+            if (_configObj == null)
+                return;
+
+            _configObj.verticalLayout = vertical;
+            MarkConfigDirty(true);
 
             VerticalLayout = vertical;
             RelayoutSpawnedPrefabs();
             SceneView.RepaintAll();
+        }
+
+        private static void MarkConfigDirty(bool flushImmediately)
+        {
+            if (_configObj == null)
+                return;
+
+            EditorUtility.SetDirty(_configObj);
+
+            if (flushImmediately)
+            {
+                AssetDatabase.SaveAssetIfDirty(_configObj);
+                return;
+            }
+
+            if (_saveScheduled)
+                return;
+
+            _saveScheduled = true;
+            EditorApplication.delayCall += FlushDeferredSave;
+        }
+
+        private static void FlushDeferredSave()
+        {
+            EditorApplication.delayCall -= FlushDeferredSave;
+            _saveScheduled = false;
+            if (_configObj)
+            {
+                AssetDatabase.SaveAssetIfDirty(_configObj);
+            }
         }
 
         private static void RelayoutSpawnedPrefabs()
