@@ -453,29 +453,32 @@ namespace Game.Editor.ParticlePrefabCollector
                 return;
             }
 
+            if (!ShowBoundaries && !ShowLabels)
+            {
+                return;
+            }
+
             var previousColor = Handles.color;
             var previousZTest = Handles.zTest;
             Handles.zTest = UnityEngine.Rendering.CompareFunction.Always;
-            foreach (var go in SpawnedPrefabs.Where(g => g))
+
+            foreach (var go in SpawnedPrefabs)
             {
-                DrawPreviewElements(go);
+                if (!go) continue;
+
+                if (ShowBoundaries)
+                {
+                    DrawBoundary(go);
+                }
+
+                if (ShowLabels)
+                {
+                    DrawLabel(go);
+                }
             }
 
             Handles.color = previousColor;
             Handles.zTest = previousZTest;
-        }
-
-        private static void DrawPreviewElements(GameObject go)
-        {
-            if (ShowBoundaries)
-            {
-                DrawBoundary(go);
-            }
-
-            if (ShowLabels)
-            {
-                DrawLabel(go);
-            }
         }
 
         private static void DrawBoundary(GameObject go)
